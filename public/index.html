@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Archive Viewer</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-brand">
+                <i class="fas fa-archive"></i>
+                <span>Web Archive Viewer</span>
+            </div>
+            <div class="nav-menu">
+                <button class="nav-link active" onclick="showView('runs')">
+                    <i class="fas fa-folder"></i> Archives
+                </button>
+                <button class="nav-link" onclick="showView('search')">
+                    <i class="fas fa-search"></i> Global Search
+                </button>
+                <button class="nav-link" onclick="showView('scraper')">
+                    <i class="fas fa-spider"></i> New Scrape
+                </button>
+            </div>
+            <div class="nav-stats" id="navStats"></div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Runs List View -->
+        <div id="runsView" class="view active">
+            <div class="page-header">
+                <h1>Scraping Archives</h1>
+                <button class="btn btn-refresh" onclick="loadRuns()">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+            </div>
+            
+            <div class="runs-grid" id="runsList"></div>
+        </div>
+
+        <!-- Global Search View -->
+        <div id="searchView" class="view">
+            <div class="page-header">
+                <h1>Global Search</h1>
+            </div>
+            
+            <div class="global-search">
+                <input type="text" id="globalSearchInput" placeholder="Search across all archives..." 
+                       onkeyup="performGlobalSearch(event)">
+                <button class="btn btn-primary" onclick="performGlobalSearch()">
+                    <i class="fas fa-search"></i> Search
+                </button>
+            </div>
+            
+            <div id="globalSearchResults" class="search-results"></div>
+        </div>
+
+        <!-- Scraper Configuration View -->
+        <div id="scraperView" class="view">
+            <div class="page-header">
+                <h1>Start New Scrape</h1>
+                <div id="scrapeStatus"></div>
+            </div>
+            
+            <div class="scraper-form">
+                <div class="form-section">
+                    <h3>Basic Configuration</h3>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="startUrl">Start URL *</label>
+                            <input type="url" id="startUrl" placeholder="https://example.com">
+                            <small>The URL to start scraping from</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="maxPages">Max Pages</label>
+                            <input type="number" id="maxPages" value="100" min="1" max="10000">
+                            <small>Maximum number of pages to scrape</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="maxDepth">Max Depth</label>
+                            <input type="number" id="maxDepth" value="3" min="1" max="10">
+                            <small>Maximum link depth to follow</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="pagesPerDomain">Pages Per Domain</label>
+                            <input type="number" id="pagesPerDomain" value="50" min="1" max="1000">
+                            <small>Maximum pages per domain</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="form-section">
+                    <h3>Advanced Settings</h3>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="maxWorkers">Max Workers</label>
+                            <input type="number" id="maxWorkers" value="10" min="1" max="50">
+                            <small>Concurrent download threads</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="requestDelay">Request Delay (seconds)</label>
+                            <input type="number" id="requestDelay" value="0.5" min="0" max="10" step="0.1">
+                            <small>Delay between requests</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="imageQuality">Image Quality</label>
+                            <input type="number" id="imageQuality" value="85" min="1" max="100">
+                            <small>JPEG compression quality</small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="maxImageWidth">Max Image Width</label>
+                            <input type="number" id="maxImageWidth" value="1920" min="100" max="4096">
+                            <small>Maximum image width in pixels</small>
+                        </div>
+                    </div>
+                    
+                    <div class="form-checkboxes">
+                        <label class="checkbox">
+                            <input type="checkbox" id="skipAssets">
+                            <span>Skip Assets (CSS, JS, Images)</span>
+                        </label>
+                        
+                        <label class="checkbox">
+                            <input type="checkbox" id="respectRobots" checked>
+                            <span>Respect robots.txt</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="form-actions">
+                    <button class="btn btn-primary btn-lg" onclick="startScrape()">
+                        <i class="fas fa-play"></i> Start Scraping
+                    </button>
+                    <button class="btn btn-danger btn-lg" onclick="stopScrape()" style="display: none;" id="stopButton">
+                        <i class="fas fa-stop"></i> Stop Scraping
+                    </button>
+                </div>
+                
+                <div id="scrapeLog" class="scrape-log" style="display: none;">
+                    <h3>Scraping Log</h3>
+                    <pre id="logContent"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Run Details View -->
+        <div id="runDetailsView" class="view">
+            <div class="page-header">
+                <button class="btn btn-back" onclick="showView('runs')">
+                    <i class="fas fa-arrow-left"></i> Back to Archives
+                </button>
+                <h1 id="runTitle"></h1>
+            </div>
+
+            <div class="tabs">
+                <button class="tab active" onclick="showTab('pages')">
+                    <i class="fas fa-file-alt"></i> Pages
+                </button>
+                <button class="tab" onclick="showTab('stats')">
+                    <i class="fas fa-chart-bar"></i> Statistics
+                </button>
+                <button class="tab" onclick="showTab('domains')">
+                    <i class="fas fa-globe"></i> Domains
+                </button>
+            </div>
+
+            <!-- Pages Tab -->
+            <div id="pagesTab" class="tab-content active">
+                <div class="search-bar">
+                    <input type="text" id="searchInput" placeholder="Search pages..." onkeyup="searchPages()">
+                    <select id="domainFilter" onchange="filterByDomain()">
+                        <option value="">All Domains</option>
+                    </select>
+                </div>
+                
+                <div id="pagesList" class="pages-list"></div>
+                <div id="pagination" class="pagination"></div>
+            </div>
+
+            <!-- Stats Tab -->
+            <div id="statsTab" class="tab-content">
+                <div class="stats-grid" id="statsContent"></div>
+            </div>
+
+            <!-- Domains Tab -->
+            <div id="domainsTab" class="tab-content">
+                <div id="domainsContent"></div>
+            </div>
+        </div>
+
+        <!-- Page Preview Modal -->
+        <div id="pagePreviewModal" class="modal">
+            <div class="modal-content modal-full">
+                <div class="modal-header">
+                    <h2 id="previewModalTitle"></h2>
+                    <div class="modal-actions">
+                        <button class="btn btn-sm" onclick="toggleCode()">
+                            <i class="fas fa-code"></i> View Code
+                        </button>
+                        <button class="btn btn-sm" onclick="copyContent()">
+                            <i class="fas fa-copy"></i> Copy
+                        </button>
+                        <button class="btn btn-sm" onclick="downloadContent()">
+                            <i class="fas fa-download"></i> Download
+                        </button>
+                        <button class="btn btn-sm" onclick="openInNewTab()">
+                            <i class="fas fa-external-link-alt"></i> New Tab
+                        </button>
+                        <button class="btn-close" onclick="closePreviewModal()">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-body">
+                    <iframe id="pagePreview" class="page-preview"></iframe>
+                    <pre id="pageCode" class="code-viewer" style="display: none;"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
