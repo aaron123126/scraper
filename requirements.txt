@@ -8,3 +8,4 @@ csscompressor==0.9.5
 jsmin==3.0.1
 aiofiles==23.2.1
 tqdm==4.66.1
+brotli==1.0.9
