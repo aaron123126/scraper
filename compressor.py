@@ -104,47 +104,85 @@ class WebCompressor:
         logger.info(f"Creating archive: {archive_path}")
         
         try:
-            # Create tar archive and compress with zstd
-            tar_process = await asyncio.create_subprocess_exec(
-                'tar', '-cf', '-', '-C', optimized_dir, '.',
+            # Check if zstd is available
+            zstd_check = await asyncio.create_subprocess_exec(
+                'which', 'zstd',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
+            await zstd_check.communicate()
             
-            zstd_process = await asyncio.create_subprocess_exec(
-                'zstd', f'-{self.compression_level}', '-o', archive_path,
-                stdin=tar_process.stdout,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # Wait for both processes to complete
-            await tar_process.wait()
-            await zstd_process.wait()
-            
-            # Get archive size
-            archive_size = os.path.getsize(archive_path)
-            logger.info(f"Archive created: {archive_path} ({archive_size:,} bytes)")
+            if zstd_check.returncode == 0:
+                # Use zstd with tar in a single command
+                logger.info("Using zstd compression...")
+                
+                # Create tar archive with zstd compression directly
+                compress_process = await asyncio.create_subprocess_exec(
+                    'tar',
+                    '--use-compress-program=zstd -' + str(self.compression_level),
+                    '-cf', archive_path,
+                    '-C', optimized_dir,
+                    '.',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await compress_process.communicate()
+                
+                if compress_process.returncode != 0:
+                    error_msg = stderr.decode() if stderr else "Unknown error"
+                    raise Exception(f"Compression failed: {error_msg}")
+                
+                # Verify archive was created
+                if not os.path.exists(archive_path):
+                    raise Exception("Archive file was not created")
+                
+                # Get archive size
+                archive_size = os.path.getsize(archive_path)
+                logger.info(f"Archive created successfully: {archive_path} ({archive_size:,} bytes)")
+                
+            else:
+                # Fallback to gzip if zstd is not available
+                logger.warning("zstd not found, falling back to gzip compression...")
+                archive_name = f"web_archive_{timestamp}.tar.gz"
+                archive_path = os.path.join(self.archive_dir, archive_name)
+                
+                compress_process = await asyncio.create_subprocess_exec(
+                    'tar', '-czf', archive_path,
+                    '-C', optimized_dir, '.',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await compress_process.communicate()
+                
+                if compress_process.returncode != 0:
+                    error_msg = stderr.decode() if stderr else "Unknown error"
+                    raise Exception(f"Compression failed: {error_msg}")
             
             return archive_path
             
-        except FileNotFoundError:
-            logger.warning("zstd not found, falling back to gzip")
-            # Fallback to gzip if zstd is not available
-            archive_name = f"web_archive_{timestamp}.tar.gz"
-            archive_path = os.path.join(self.archive_dir, archive_name)
-            
-            await asyncio.create_subprocess_exec(
-                'tar', '-czf', archive_path, '-C', optimized_dir, '.',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            return archive_path
-        
         except Exception as e:
             logger.error(f"Error creating archive: {e}")
-            raise
+            
+            # Try Python's built-in compression as last resort
+            logger.info("Falling back to Python's built-in compression...")
+            try:
+                import tarfile
+                import gzip
+                
+                archive_name = f"web_archive_{timestamp}.tar.gz"
+                archive_path = os.path.join(self.archive_dir, archive_name)
+                
+                with tarfile.open(archive_path, "w:gz", compresslevel=9) as tar:
+                    tar.add(optimized_dir, arcname=".")
+                
+                logger.info(f"Archive created with Python tarfile: {archive_path}")
+                return archive_path
+                
+            except Exception as fallback_error:
+                logger.error(f"All compression methods failed: {fallback_error}")
+                raise
     
     async def compress(self) -> Dict:
         """Main compression workflow"""
