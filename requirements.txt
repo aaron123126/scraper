@@ -1,0 +1,10 @@
+python-dotenv==1.0.0
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+Pillow==10.1.0
+htmlmin==0.1.12
+csscompressor==0.9.5
+jsmin==3.0.1
+aiofiles==23.2.1
+tqdm==4.66.1

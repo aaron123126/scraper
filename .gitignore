@@ -1,0 +1,5 @@
+__pycache__
+.venv
+archives
+scraped_data
+web_archiver.log
