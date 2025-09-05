@@ -27,30 +27,28 @@ class URLFilter:
         r'/signin',
         r'/signup',
         r'/register',
-        r'/download',
         r'/logout',
-        r'\.pdf$',
-        r'\.zip$',
-        r'\.exe$',
-        r'\.dmg$',
-        r'\.msi$',
-        r'\.tar\.gz$',
-        r'\.rar$',
         r'mailto:',
         r'tel:',
         r'javascript:',
         r'#$'
     ]
     
+    # Don't exclude downloads anymore since we want to capture full sites
+    DOWNLOAD_EXTENSIONS = {
+        '.pdf', '.zip', '.exe', '.dmg', '.msi', 
+        '.tar.gz', '.rar', '.doc', '.docx', '.xls', '.xlsx'
+    }
+    
     # File extensions to process
     ALLOWED_EXTENSIONS = {
         '.html', '.htm', '.php', '.asp', '.aspx', 
-        '.jsp', '.css', '.js', '.json', '.xml'
+        '.jsp', '.css', '.js', '.json', '.xml', '.txt', ''
     }
     
     IMAGE_EXTENSIONS = {
         '.jpg', '.jpeg', '.png', '.gif', '.webp', 
-        '.svg', '.ico', '.bmp', '.avif'
+        '.svg', '.ico', '.bmp', '.avif', '.webm'
     }
     
     @classmethod
@@ -62,6 +60,14 @@ class URLFilter:
             
             # Check if same domain
             if parsed.netloc != base_parsed.netloc:
+                return False
+            
+            # Get file extension
+            path = parsed.path.lower()
+            ext = os.path.splitext(path)[1]
+            
+            # Skip download files
+            if ext in cls.DOWNLOAD_EXTENSIONS:
                 return False
             
             # Check exclude patterns
@@ -85,6 +91,26 @@ class URLFilter:
     def get_url_hash(cls, url: str) -> str:
         """Generate hash for URL for storage"""
         return hashlib.md5(url.encode()).hexdigest()
+    
+    @classmethod
+    def is_asset_url(cls, url: str) -> str:
+        """Determine if URL is an asset and return its type"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        ext = os.path.splitext(path)[1]
+        
+        if ext in cls.IMAGE_EXTENSIONS:
+            return 'image'
+        elif ext == '.css':
+            return 'css'
+        elif ext in ['.js', '.mjs']:
+            return 'js'
+        elif ext in ['.woff', '.woff2', '.ttf', '.eot', '.otf']:
+            return 'font'
+        elif ext in ['.mp4', '.webm', '.ogg', '.mp3', '.wav']:
+            return 'media'
+        
+        return None
 
 class RobotsChecker:
     """Check robots.txt compliance"""

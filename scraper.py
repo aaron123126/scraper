@@ -7,10 +7,11 @@ import os
 import json
 import time
 from datetime import datetime
-from typing import Set, Dict, Optional
+from typing import Set, Dict, Optional, Tuple
 from tqdm.asyncio import tqdm
 import logging
 from utils import URLFilter, RobotsChecker, ScraperStats, save_json, ensure_directories
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class WebScraper:
         
         self.visited_urls: Set[str] = set()
         self.scraped_data: Dict[str, dict] = {}
+        self.asset_map: Dict[str, str] = {}  # Map original URLs to local paths
         self.queue = asyncio.Queue()
         self.semaphore = asyncio.Semaphore(max_workers)
         self.robots_checker = RobotsChecker() if respect_robots else None
@@ -51,8 +53,197 @@ class WebScraper:
         self.should_stop = False
         
         # Ensure output directories exist
-        ensure_directories(output_dir, f"{output_dir}/html", f"{output_dir}/assets")
+        ensure_directories(
+            output_dir, 
+            f"{output_dir}/html", 
+            f"{output_dir}/assets",
+            f"{output_dir}/css",
+            f"{output_dir}/js",
+            f"{output_dir}/images"
+        )
         
+    def get_asset_local_path(self, url: str, asset_type: str) -> str:
+        """Generate local path for an asset"""
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        ext = os.path.splitext(urlparse(url).path)[1] or '.bin'
+        
+        # Determine subdirectory based on asset type
+        if asset_type in ['image', 'img']:
+            subdir = 'images'
+        elif asset_type == 'css':
+            subdir = 'css'
+        elif asset_type in ['js', 'javascript']:
+            subdir = 'js'
+        else:
+            subdir = 'assets'
+        
+        return f"{subdir}/{url_hash}{ext}"
+    
+    async def download_asset(self, session: aiohttp.ClientSession, url: str, asset_type: str) -> Optional[str]:
+        """Download an asset and return its local path"""
+        try:
+            # Skip if already downloaded
+            if url in self.asset_map:
+                return self.asset_map[url]
+            
+            # Apply rate limiting
+            domain = urlparse(url).netloc
+            await self.apply_rate_limit(domain)
+            
+            async with self.semaphore:
+                async with session.get(url, timeout=30, ssl=False) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        
+                        # Generate local path
+                        local_path = self.get_asset_local_path(url, asset_type)
+                        full_path = f"{self.output_dir}/{local_path}"
+                        
+                        # Save asset
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        
+                        if asset_type in ['css', 'js']:
+                            # Text assets
+                            async with aiofiles.open(full_path, 'w', encoding='utf-8') as f:
+                                await f.write(content.decode('utf-8', errors='ignore'))
+                        else:
+                            # Binary assets
+                            async with aiofiles.open(full_path, 'wb') as f:
+                                await f.write(content)
+                        
+                        # Store mapping
+                        self.asset_map[url] = local_path
+                        logger.debug(f"Downloaded asset: {url} -> {local_path}")
+                        
+                        return local_path
+                    else:
+                        logger.warning(f"Failed to download asset {url}: HTTP {response.status}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"Error downloading asset {url}: {e}")
+            return None
+    
+    async def rewrite_html_urls(self, html: str, base_url: str, session: aiohttp.ClientSession) -> str:
+        """Rewrite URLs in HTML to point to local assets"""
+        soup = BeautifulSoup(html, 'lxml')
+        
+        # Process different types of assets
+        asset_tasks = []
+        
+        # Images
+        for img in soup.find_all(['img', 'source']):
+            for attr in ['src', 'srcset', 'data-src', 'data-srcset']:
+                if img.get(attr):
+                    urls = []
+                    # Handle srcset which can have multiple URLs
+                    if 'srcset' in attr:
+                        srcset_parts = img[attr].split(',')
+                        for part in srcset_parts:
+                            url_part = part.strip().split(' ')[0]
+                            if url_part:
+                                urls.append(url_part)
+                    else:
+                        urls.append(img[attr])
+                    
+                    for url in urls:
+                        if url and not url.startswith('data:'):
+                            absolute_url = urljoin(base_url, url)
+                            asset_tasks.append((img, attr, url, absolute_url, 'image'))
+        
+        # CSS files
+        for link in soup.find_all('link', rel='stylesheet'):
+            if link.get('href'):
+                url = link['href']
+                absolute_url = urljoin(base_url, url)
+                asset_tasks.append((link, 'href', url, absolute_url, 'css'))
+        
+        # JavaScript files
+        for script in soup.find_all('script'):
+            if script.get('src'):
+                url = script['src']
+                absolute_url = urljoin(base_url, url)
+                asset_tasks.append((script, 'src', url, absolute_url, 'js'))
+        
+        # CSS in style tags (for url() references)
+        for style in soup.find_all('style'):
+            if style.string:
+                style.string = await self.rewrite_css_urls(style.string, base_url, session)
+        
+        # Inline styles with url()
+        for element in soup.find_all(style=True):
+            element['style'] = await self.rewrite_css_urls(element['style'], base_url, session)
+        
+        # Download assets and update URLs
+        if not self.skip_assets:
+            for element, attr, original_url, absolute_url, asset_type in asset_tasks:
+                local_path = await self.download_asset(session, absolute_url, asset_type)
+                if local_path:
+                    # Update the URL to point to local file
+                    # Use relative path from html directory
+                    relative_path = f"../{local_path}"
+                    
+                    if 'srcset' in attr:
+                        # Handle srcset specially
+                        srcset_parts = element[attr].split(',')
+                        new_srcset = []
+                        for part in srcset_parts:
+                            part_items = part.strip().split(' ')
+                            if part_items[0] == original_url:
+                                part_items[0] = relative_path
+                            new_srcset.append(' '.join(part_items))
+                        element[attr] = ', '.join(new_srcset)
+                    else:
+                        element[attr] = relative_path
+        
+        # Process links to make them work locally
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                absolute_url = urljoin(base_url, href)
+                # Check if we have this page
+                if absolute_url in self.visited_urls:
+                    # Link to local HTML file
+                    url_hash = URLFilter.get_url_hash(absolute_url)
+                    a['href'] = f"{url_hash}.html"
+                else:
+                    # Keep as external link but make it absolute
+                    a['href'] = absolute_url
+        
+        return str(soup)
+    
+    async def rewrite_css_urls(self, css_content: str, base_url: str, session: aiohttp.ClientSession) -> str:
+        """Rewrite URLs in CSS content"""
+        import re
+        
+        # Find all url() references
+        url_pattern = r'urlKATEX_INLINE_OPEN[\'"]?([^\'")]+)[\'"]?KATEX_INLINE_CLOSE'
+        
+        async def replace_url(match):
+            url = match.group(1)
+            if not url.startswith('data:'):
+                absolute_url = urljoin(base_url, url)
+                local_path = await self.download_asset(session, absolute_url, 'image')
+                if local_path:
+                    # Use relative path from css directory
+                    relative_path = f"../{local_path}"
+                    return f'url("{relative_path}")'
+            return match.group(0)
+        
+        # Process URLs sequentially (regex doesn't support async)
+        urls = re.findall(url_pattern, css_content)
+        for url in urls:
+            if not url.startswith('data:'):
+                absolute_url = urljoin(base_url, url)
+                local_path = await self.download_asset(session, absolute_url, 'image')
+                if local_path:
+                    relative_path = f"../{local_path}"
+                    css_content = css_content.replace(f'url({url})', f'url({relative_path})')
+                    css_content = css_content.replace(f'url("{url}")', f'url("{relative_path}")')
+                    css_content = css_content.replace(f"url('{url}')", f'url("{relative_path}")')
+        
+        return css_content
+    
     async def check_limits(self, url: str) -> bool:
         """Check if we should continue scraping based on limits"""
         # Check global page limit
@@ -82,7 +273,7 @@ class WebScraper:
             
             self.last_request_time[domain] = time.time()
     
-    async def fetch_page(self, session: aiohttp.ClientSession, url: str) -> Optional[tuple]:
+    async def fetch_page(self, session: aiohttp.ClientSession, url: str) -> Optional[Tuple[str, str]]:
         """Fetch a single page"""
         try:
             # Check robots.txt
@@ -120,18 +311,9 @@ class WebScraper:
         try:
             soup = BeautifulSoup(html, 'lxml')
             
-            # Extract from various tags
-            for tag in soup.find_all(['a', 'link', 'script', 'img']):
-                url = None
-                if tag.name == 'a':
-                    url = tag.get('href')
-                elif tag.name == 'link':
-                    url = tag.get('href')
-                elif tag.name == 'script' and not self.skip_assets:
-                    url = tag.get('src')
-                elif tag.name == 'img' and not self.skip_assets:
-                    url = tag.get('src')
-                
+            # Extract from links
+            for tag in soup.find_all(['a', 'area']):
+                url = tag.get('href')
                 if url:
                     absolute_url = urljoin(base_url, url)
                     if URLFilter.should_scrape(absolute_url, self.base_domain):
@@ -142,29 +324,22 @@ class WebScraper:
             
         return urls
     
-    async def save_page_content(self, url: str, content: str, content_type: str):
+    async def save_page_content(self, url: str, content: str, content_type: str) -> Optional[str]:
         """Save page content to disk"""
         try:
             url_hash = URLFilter.get_url_hash(url)
             
-            # Determine file extension
-            if 'html' in content_type:
-                ext = '.html'
-                subdir = 'html'
-            elif 'css' in content_type and not self.skip_assets:
-                ext = '.css'
-                subdir = 'assets'
-            elif 'javascript' in content_type and not self.skip_assets:
-                ext = '.js'
-                subdir = 'assets'
-            elif 'json' in content_type:
-                ext = '.json'
-                subdir = 'assets'
+            # Always save HTML files in the html directory
+            if 'html' in content_type or 'text' in content_type:
+                filepath = f"{self.output_dir}/html/{url_hash}.html"
             else:
+                # Other content types
                 ext = '.txt'
-                subdir = 'html'
-            
-            filepath = f"{self.output_dir}/{subdir}/{url_hash}{ext}"
+                if 'json' in content_type:
+                    ext = '.json'
+                elif 'xml' in content_type:
+                    ext = '.xml'
+                filepath = f"{self.output_dir}/html/{url_hash}{ext}"
             
             async with aiofiles.open(filepath, 'w', encoding='utf-8') as f:
                 await f.write(content)
@@ -203,6 +378,11 @@ class WebScraper:
         
         # Update stats
         self.stats.add_page(url, len(content))
+        
+        # Process HTML content
+        if 'html' in content_type:
+            # Rewrite URLs to point to local assets
+            content = await self.rewrite_html_urls(content, url, session)
         
         # Save content
         filepath = await self.save_page_content(url, content, content_type)
@@ -308,13 +488,15 @@ class WebScraper:
             'timestamp': datetime.now().isoformat(),
             'stats': final_stats,
             'domain_counts': self.domain_counts,
-            'pages': self.scraped_data
+            'pages': self.scraped_data,
+            'asset_map': self.asset_map  # Save asset mappings
         }, metadata_path)
         
         # Log summary
         logger.info("=" * 60)
         logger.info("Scraping Summary:")
         logger.info(f"  Pages scraped: {self.pages_scraped_count}/{self.max_pages}")
+        logger.info(f"  Assets downloaded: {len(self.asset_map)}")
         logger.info(f"  Pages failed: {final_stats['pages_failed']}")
         logger.info(f"  Data downloaded: {final_stats['bytes_downloaded']:,} bytes")
         logger.info(f"  Time elapsed: {final_stats['elapsed_seconds']:.2f} seconds")

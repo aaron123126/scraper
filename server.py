@@ -100,16 +100,60 @@ class WebArchiveServer:
         
         run_dir = self.scraped_data_dir / run_id
         
-        # Find the HTML file
-        html_file = run_dir / 'html' / f"{page_hash}.html"
-        if html_file.exists():
-            async with aiofiles.open(html_file, 'r', encoding='utf-8') as f:
-                content = await f.read()
-            
-            # Return as HTML response for direct rendering
-            return web.Response(text=content, content_type='text/html')
+        # Try to find the HTML file
+        for ext in ['.html', '.htm', '.txt']:
+            html_file = run_dir / 'html' / f"{page_hash}{ext}"
+            if html_file.exists():
+                async with aiofiles.open(html_file, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                
+                # Set base tag for relative URLs to work
+                if '<head>' in content:
+                    # Insert base tag to help with asset loading
+                    base_path = f"/static/{run_id}/"
+                    base_tag = f'<base href="{base_path}">'
+                    content = content.replace('<head>', f'<head>{base_tag}')
+                
+                # Return as HTML response for direct rendering
+                return web.Response(text=content, content_type='text/html')
         
-        return web.Response(text='Page not found', status=404)
+        # If not found, return a proper 404 page
+        error_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: #f3f4f6;
+                }
+                .error-container {
+                    text-align: center;
+                    padding: 2rem;
+                    background: white;
+                    border-radius: 0.5rem;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                }
+                h1 { color: #ef4444; }
+                p { color: #6b7280; }
+            </style>
+        </head>
+        <body>
+            <div class="error-container">
+                <h1>404 - Page Not Found</h1>
+                <p>The requested page could not be found in the archive.</p>
+                <p>It may not have been scraped or could have been filtered out.</p>
+            </div>
+        </body>
+        </html>
+        """
+        return web.Response(text=error_html, content_type='text/html', status=404)
     
     async def start_scrape(self, request):
         """Start a new scraping job"""
